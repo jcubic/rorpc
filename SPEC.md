@@ -30,6 +30,21 @@ report.section("summary").rows.first().text()
 One message, and the object stayed where it was. A protocol that called one method at a
 time would need four round trips and three intermediate objects it could not send.
 
+**A step may pass a function.** The function does not travel; a reference to it does, and
+the Host calls back across the same connection while the chain is still running:
+
+```
+report.section("summary").rows.find(callback).text()
+```
+
+```json
+{ "type": "call", "args": [{ "__type__": "function", "__data__": { "callback": 1 } }] }
+```
+
+`find` runs on the Host. Each time it tests a row, the Host asks the Client to run
+`callback` and waits for the answer, then the chain continues and answers as one Response.
+Section 11 describes this.
+
 ### A note on languages
 
 Nothing here is specific to one language. The two ends may be written in different
@@ -212,13 +227,17 @@ evaluation.
 ### 6.2 Function marker
 
 ```json
+{ "__type__": "function", "__data__": { "callback": 2 } }
 { "__type__": "function", "__data__": { "callback": 1, "arity": 1 } }
 ```
 
-| Member     | Type    | Required | Meaning                                     |
-| ---------- | ------- | -------- | ------------------------------------------- |
-| `callback` | integer | yes      | Entry in the Client's callback table (§11)  |
-| `arity`    | integer | yes      | Parameters the function declares; see §11.2 |
+| Member     | Type    | Required | Meaning                                          |
+| ---------- | ------- | -------- | ------------------------------------------------ |
+| `callback` | integer | yes      | Entry in the Client's callback table (§11)       |
+| `arity`    | integer | **no**   | Most arguments the Client will accept; see §11.2 |
+
+An absent `arity` places no limit: the Host sends every argument the call produced. The
+first example above asks for all of them, the second for one.
 
 Direction: **Client to Host only**. A Host MUST NOT emit a function marker; functions in a
 result are dropped, exactly as `JSON.stringify` drops them. A Host that wishes to expose a
@@ -326,7 +345,8 @@ for a message it rejected under Section 7.6.
 `call` identifies the **invocation**, not the function: the same callback may be running
 more than once concurrently, and each invocation MUST carry its own `call`.
 
-A Host MUST truncate `args` to the `arity` the function marker declared (Section 11.2).
+A Host MUST truncate `args` to the `arity` the function marker gave, if it gave one
+(Section 11.2). With no `arity` it sends every argument.
 
 ### 7.4 Callback result — Client to Host
 
@@ -544,6 +564,30 @@ twice does not mint two entries.
 Arguments that the Host cannot copy become handles, and those handles last only as long as
 the invocation — see §10.4.
 
+A whole exchange, for `rows.find(callback).text()`. The Client sends one Request; the Host
+calls back twice while evaluating it, and answers once at the end:
+
+```json
+C→H  {"rorpc":"1.0","id":1,"namespace":"report","ops":[
+       {"type":"get","key":"rows"},
+       {"type":"get","key":"find"},
+       {"type":"call","args":[{"__type__":"function","__data__":{"callback":1,"arity":1}}]},
+       {"type":"get","key":"text"},
+       {"type":"call","args":[]}]}
+
+H→C  {"rorpc":"1.0","callback":1,"call":1,"args":["first row"]}
+C→H  {"rorpc":"1.0","call":1,"result":false}
+H→C  {"rorpc":"1.0","callback":1,"call":2,"args":["second row"]}
+C→H  {"rorpc":"1.0","call":2,"result":true}
+
+H→C  {"rorpc":"1.0","id":1,"result":"second row"}
+```
+
+Two things follow from the shape of this. The Host is evaluating a Request while it waits
+for a Callback result, so it MUST be able to do both at once (§11.3). And the `call`
+identifiers are the Host's, counted separately from the `id` of the Request they arose
+under — one Request may produce any number of invocations, or none.
+
 ### 11.2 Arity
 
 `arity` is a limit the Client may place on how many arguments it will accept. It is
@@ -564,7 +608,24 @@ index and also the element, a value and also the whole collection, and those add
 arguments are often precisely the objects that cannot cross a channel.
 
 A Client whose language tolerates surplus arguments, and whose callback can take whatever
-arrives, SHOULD omit `arity` rather than guess a number. See Section 16.3.
+arrives, MAY omit `arity`. Section 16.3 covers how to choose.
+
+**Omitting it is not free.** Everything the caller passed is then serialized and sent, and
+a Client that sends no `arity` should expect all three of these:
+
+- **Objects the Host cannot copy become handles.** A callback invoked once per row, given
+  the row as well as the index, costs one handle per invocation. They are released when
+  each invocation completes (§10.4), so they do not accumulate, but they are still minted,
+  sent and released for arguments nobody wanted.
+- **The extras may not be representable.** An argument that cannot be copied and cannot be
+  kept as a handle fails the invocation, and with it the Request that caused it — for an
+  argument the callback would have ignored.
+- **The Client may not tolerate them.** A callable with a fixed signature raises on a
+  surplus in many languages. A Client that omits `arity` MUST be prepared to drop the extra
+  arguments itself, at the point it dispatches to the callable.
+
+Sending an `arity` moves all three problems to the one side that can settle them cheaply:
+the Host simply does not serialize what was not asked for.
 
 ### 11.3 Nesting
 
@@ -689,14 +750,15 @@ Both MUST emit `rorpc` on every message and MUST apply Section 5.2 on mismatch.
 [`@jcubic/mitty`](https://github.com/jcubic/mitty) is the reference implementation. As of
 **0.5.0** it conforms, with one gap:
 
-| Requirement                             | 0.5.0                                                  |
-| --------------------------------------- | ------------------------------------------------------ |
-| `rorpc` member on every message (§5)    | Implemented.                                           |
-| `__data__` as an object (§6)            | Implemented.                                           |
-| `code` on Host-originated errors (§9.2) | Implemented, and carried onto the reconstructed error. |
-| A way to omit `arity` (§16.3)           | Implemented as `variadic()`, documented in the README. |
-| A documented key policy (§13.2)         | **Not implemented.** `resolve()` is the only boundary. |
-| Everything else                         | Implemented.                                           |
+| Requirement                             | 0.5.0                                                   |
+| --------------------------------------- | ------------------------------------------------------- |
+| `rorpc` member on every message (§5)    | Implemented.                                            |
+| `__data__` as an object (§6)            | Implemented.                                            |
+| `code` on Host-originated errors (§9.2) | Implemented, and carried onto the reconstructed error.  |
+| Call-scoped handles (§10.4)             | Implemented.                                            |
+| `arity` from a parameter count (§16.3)  | Implemented from the required count, limits documented. |
+| A documented key policy (§13.2)         | **Not implemented.** `resolve()` is the only boundary.  |
+| Everything else                         | Implemented.                                            |
 
 Versions up to **0.4.x** speak an earlier, unversioned format with positional `__data__`
 arrays and no codes. They do not interoperate with 1.0 in either direction: a 1.0 peer
@@ -746,20 +808,28 @@ A `call` requires the current value to be invocable. What qualifies is the imple
 choice: a function, a method reference, a bound delegate, an object with a single abstract
 method, or an object that defines invocation.
 
-`arity` (§11.2) is optional, and a Client decides whether it needs one at all.
+`arity` (§11.2) is optional. A Client that can say how many arguments a callable takes
+SHOULD send one, because of what omitting it costs (§11.2).
 
-A Client in a language that raises on surplus arguments SHOULD send an `arity`, derived
-from the callable's parameter count where the language reports one. A Client in a language
-that ignores surplus arguments MAY omit it and take whatever arrives.
+**The count a language reports may not be the count you want.** Introspection commonly
+gives the number of parameters _before_ the first optional or variadic one — what the
+callable requires, not what it accepts. A limit taken from that number caps the call at the
+required count, so an optional parameter never receives a value and a callable that takes
+only a variadic receives nothing.
 
-Where a language reports a parameter count, that count may not mean what it appears to. It
-commonly counts the parameters before the first optional or variadic one — the number the
-callable _requires_, not the number it will accept. Deriving a limit from it caps the call
-at the required count, so an optional parameter can never be supplied and a callable that
-takes only a variadic receives nothing.
+Languages differ in how much they will tell you, and the choice follows from that:
 
-An implementation SHOULD NOT derive `arity` from such a count. One that does MUST offer a
-way to omit it, and MUST document how.
+- Where the two counts are both available — PHP's `getNumberOfParameters` beside
+  `getNumberOfRequiredParameters`, and the equivalent elsewhere — a Client SHOULD send the
+  count it _accepts_, so that optional parameters can be filled. A variadic callable has no
+  such count, and a Client SHOULD omit `arity` for one.
+- Where only one count is available and it is the required one, a Client MAY still send it,
+  provided it **documents that optional and variadic parameters are not filled**. That is a
+  real restriction on what callbacks may be written, and users have to be told.
+- Where no count is available, a Client MUST either omit `arity` and handle the surplus
+  itself (§11.2), or take the number from the caller.
+
+An implementation MUST document which of these it does.
 
 ### 16.4 Errors
 
@@ -786,7 +856,7 @@ type Marker = ObjectMarker | FunctionMarker | ErrorMarker;
 type ObjectMarker = { __type__: 'object'; __data__: { handle: number } };
 type FunctionMarker = {
   __type__: 'function';
-  __data__: { callback: number; arity: number };
+  __data__: { callback: number; arity?: number };
 };
 type ErrorMarker = {
   __type__: 'error';
@@ -842,24 +912,38 @@ C→H  {"rorpc":"1.0","id":3,"object":1,"ops":[{"type":"get","key":"isFile"},{"t
 H→C  {"rorpc":"1.0","id":3,"result":true}
 ```
 
-**A callback.** The function stays in the Client; the Host invokes it twice, concurrently,
-under one `callback` and two distinct `call` identifiers. `arity` is 1, so the Host sends one
-argument even though it called with two. The Response arrives only after both results.
+**A callback with no limit.** The function stays in the Client; the Host invokes it twice,
+concurrently, under one `callback` and two distinct `call` identifiers. The marker carries
+no `arity`, so both arguments the caller passed arrive. The Response comes only after both
+results.
 
 ```json
-C→H  {"rorpc":"1.0","id":4,"namespace":"$","ops":[{"type":"get","key":"each"},{"type":"call","args":[{"__type__":"function","__data__":{"callback":1,"arity":1}}]}]}
-H→C  {"rorpc":"1.0","callback":1,"call":1,"args":[0]}
-H→C  {"rorpc":"1.0","callback":1,"call":2,"args":[1]}
+C→H  {"rorpc":"1.0","id":4,"namespace":"$","ops":[{"type":"get","key":"each"},{"type":"call","args":[{"__type__":"function","__data__":{"callback":1}}]}]}
+H→C  {"rorpc":"1.0","callback":1,"call":1,"args":[0,0]}
+H→C  {"rorpc":"1.0","callback":1,"call":2,"args":[1,10]}
 C→H  {"rorpc":"1.0","call":1,"result":0}
-C→H  {"rorpc":"1.0","call":2,"result":2}
-H→C  {"rorpc":"1.0","id":4,"result":[ ... ]}
+C→H  {"rorpc":"1.0","call":2,"result":11}
+H→C  {"rorpc":"1.0","id":4,"result":[0,11]}
+```
+
+**The same callback, limited to one argument.** `arity` is 1, so the Host truncates. The
+second argument is never serialized — which is the point when it is something the Host
+would otherwise have to keep a handle for.
+
+```json
+C→H  {"rorpc":"1.0","id":5,"namespace":"$","ops":[{"type":"get","key":"each"},{"type":"call","args":[{"__type__":"function","__data__":{"callback":2,"arity":1}}]}]}
+H→C  {"rorpc":"1.0","callback":2,"call":3,"args":[0]}
+H→C  {"rorpc":"1.0","callback":2,"call":4,"args":[1]}
+C→H  {"rorpc":"1.0","call":3,"result":0}
+C→H  {"rorpc":"1.0","call":4,"result":1}
+H→C  {"rorpc":"1.0","id":5,"result":[0,1]}
 ```
 
 **A write.** The Response carries no `result` — §7.2, §8.2.
 
 ```json
-C→H  {"rorpc":"1.0","id":5,"namespace":"cfg","ops":[{"type":"set","key":"title","value":"set"}]}
-H→C  {"rorpc":"1.0","id":5}
+C→H  {"rorpc":"1.0","id":6,"namespace":"cfg","ops":[{"type":"set","key":"title","value":"set"}]}
+H→C  {"rorpc":"1.0","id":6}
 ```
 
 **A release.** No Response.
@@ -871,11 +955,11 @@ C→H  {"rorpc":"1.0","release":1}
 **A protocol error and an application error**, told apart by `code`.
 
 ```json
-C→H  {"rorpc":"1.0","id":6,"namespace":"$","ops":[{"type":"get","key":"nope"},{"type":"call","args":[]}]}
-H→C  {"rorpc":"1.0","id":6,"error":{"__type__":"error","__data__":{"name":"TypeError","message":"$.nope is not a function","code":-32010}}}
+C→H  {"rorpc":"1.0","id":7,"namespace":"$","ops":[{"type":"get","key":"nope"},{"type":"call","args":[]}]}
+H→C  {"rorpc":"1.0","id":7,"error":{"__type__":"error","__data__":{"name":"TypeError","message":"mitty: $.nope is not a function","code":-32010}}}
 
-C→H  {"rorpc":"1.0","id":7,"namespace":"ghost","ops":[{"type":"get","key":"x"},{"type":"call","args":[]}]}
-H→C  {"rorpc":"1.0","id":7,"error":{"__type__":"error","__data__":{"name":"Error","message":"unknown module 'ghost'","code":-32601}}}
+C→H  {"rorpc":"1.0","id":8,"namespace":"ghost","ops":[{"type":"get","key":"x"},{"type":"call","args":[]}]}
+H→C  {"rorpc":"1.0","id":8,"error":{"__type__":"error","__data__":{"name":"Error","message":"mitty: unknown module 'ghost'","code":-32601}}}
 ```
 
 ---
