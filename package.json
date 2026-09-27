@@ -1,0 +1,15 @@
+{
+  "name": "rorpc",
+  "version": "0.1.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {},
+  "keywords": [],
+  "author": "Jakub T. Jankiewicz <jcubic@jcubic.pl> (https://jakub.jankiewicz.org/)",
+  "license": "CC0",
+  "type": "module",
+  "dependencies": {
+    "marked": "^18.0.14",
+    "marked-gfm-heading-id": "^4.1.4"
+  }
+}
