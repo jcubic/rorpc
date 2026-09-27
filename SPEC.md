@@ -3,18 +3,49 @@
 **Version 1.0** · Status: Draft · 2026-09-27
 
 RO/RPC is a stateless, transport-agnostic protocol for using an object that lives somewhere
-else. Where [JSON-RPC](https://www.jsonrpc.org/specification) calls a named method with
+else. Where [JSON-RPC](https://www.jsonrpc.org/specification) calls one named method with
 arguments, RO/RPC replays a **chain** of property reads, property writes and calls against
-an object that never leaves its own context — a DOM node, a jQuery object, a cheerio
-document, a database handle, anything whose methods are the point of it.
+an object that never leaves the context that owns it — a user interface element, a parsed
+document, a database cursor, a file handle: anything whose behaviour, rather than its data,
+is the point of it.
 
-```js
-await $('#list').find('li').first().text();
+A chain is a list of steps. Written out, this one is four:
 
-await document.querySelector('body').style.setProperty('background', '#555');
+```
+report.section("summary").rows.first().text()
 ```
 
-Four steps, one message, and the object stayed where it was.
+```json
+[
+  { "type": "get", "key": "section" },
+  { "type": "call", "args": ["summary"] },
+  { "type": "get", "key": "rows" },
+  { "type": "get", "key": "first" },
+  { "type": "call", "args": [] },
+  { "type": "get", "key": "text" },
+  { "type": "call", "args": [] }
+]
+```
+
+One message, and the object stayed where it was. A protocol that called one method at a
+time would need four round trips and three intermediate objects it could not send.
+
+### A note on languages
+
+Nothing here is specific to one language. The two ends may be written in different
+languages, and the protocol carries no types beyond those JSON defines.
+
+How a chain is _built_ does differ. A language with runtime interception — proxies in
+JavaScript, `__getattr__` in Python, `method_missing` in Ruby — can record a chain from
+ordinary syntax, so remote code reads like local code. A language without it builds the
+same chain through an explicit API:
+
+```
+remote("report").get("section").call("summary").get("rows").call("text")
+```
+
+Both produce the message above, and a peer cannot tell which was used. Section 16 collects
+the points where a language's own conventions have to be mapped onto the protocol.
 
 ## Table of contents
 
@@ -33,8 +64,9 @@ Four steps, one message, and the object stayed where it was.
 13. [Security considerations](#13-security-considerations)
 14. [Differences from JSON-RPC 2.0](#14-differences-from-json-rpc-20)
 15. [Conformance](#15-conformance)
-16. [Appendix A: schema](#appendix-a-schema)
-17. [Appendix B: an annotated session](#appendix-b-an-annotated-session)
+16. [Language mapping](#16-language-mapping)
+17. [Appendix A: schema](#appendix-a-schema)
+18. [Appendix B: an annotated session](#appendix-b-an-annotated-session)
 
 ---
 
@@ -93,9 +125,12 @@ one. (JSON-RPC batching is deliberately absent; see Section 14.)
 A receiver that cannot parse a message as JSON MUST ignore it. It MUST NOT reply, because a
 message it could not parse carries no identifier to reply to.
 
-**Absent means `undefined`.** JSON has no `undefined`, and serializers routinely drop object
-keys whose value is `undefined`. RO/RPC relies on this: a Response with no `result` key
-denotes the JavaScript value `undefined`, not a missing field. See Section 7.2.
+**An absent member means "no value".** JSON offers only `null`, and languages differ on
+whether they have one empty value or two. RO/RPC therefore distinguishes three cases for an
+optional member: present with a value; present as `null`; and absent. A Response with no
+`result` member reports that the chain produced nothing, which is distinct from a Response
+whose `result` is `null`. Section 16.1 gives the mapping for languages that do not draw
+that distinction.
 
 ## 5. Protocol version
 
@@ -217,10 +252,9 @@ MUST tolerate members it does not recognise.
 `stack` and `code` are optional and are absent when not supplied; a receiver MUST NOT treat
 an absent `stack` as an error.
 
-Only these four members are defined. **Other own properties of an error are not
-transmitted** — a Node `ENOENT` error arrives without its `code` property, and a
-`ValidationError` without its `errors` array. An application that needs more MUST put it in
-the message or use `code`.
+Only these four members are defined. **An error's own fields do not travel.** A file error
+arrives without the path it failed on, a validation error without the list of what failed.
+An application that needs more MUST carry it in `message` or distinguish it with `code`.
 
 ## 7. Messages
 
@@ -268,8 +302,8 @@ A Response MUST NOT carry an `ops` member.
 
 `result` and `error` MUST NOT both be present. When `error` is present the Request failed;
 when it is absent the Request succeeded and `result` holds the value, **with an absent
-`result` denoting `undefined`**. The third example above is the Response to a successful
-`set`.
+`result` meaning the chain produced no value**. The third example above is the Response to a
+successful `set`.
 
 A receiver MUST treat `error` as present only when it is a well-formed error marker. An
 implementation MUST NOT decide success by truthiness alone.
@@ -361,27 +395,33 @@ two values:
 - `object` present: the handle table entry. A handle that is absent MUST fail the Request
   with `-32602`.
 - `namespace` present: the implementation resolves the name. Resolution MAY be
-  asynchronous. A name that resolves to `null` or `undefined` MUST fail with `-32601`.
+  asynchronous. A name that resolves to nothing MUST fail with `-32601`.
 
 ### 8.2 Operations
 
-| Op                                        | Effect                                                                |
-| ----------------------------------------- | --------------------------------------------------------------------- |
-| `{ "type": "get", "key": k }`             | `receiver = value`; `value = value[k]`                                |
-| `{ "type": "set", "key": k, "value": v }` | `value[k] = v`; then `value = undefined`, `receiver = undefined`      |
-| `{ "type": "call", "args": a }`           | `value = await value.apply(receiver, a)`; then `receiver = undefined` |
+| Op                                        | Effect                                                                           |
+| ----------------------------------------- | -------------------------------------------------------------------------------- |
+| `{ "type": "get", "key": k }`             | The receiver becomes the current value; the value becomes its member `k`         |
+| `{ "type": "set", "key": k, "value": v }` | Member `k` of the value is set to `v`; the value and receiver become nothing     |
+| `{ "type": "call", "args": a }`           | The value is invoked with `a` against the receiver; the receiver becomes nothing |
+
+"Member" means whatever the host language reads for a named access — a field, a property,
+an attribute, an entry of a map, or a getter. An implementation chooses that mapping and
+MUST apply it consistently to `get` and `set`; see Section 16.2.
 
 Notes, all normative:
 
-- **`get` on `null` or `undefined` yields `undefined`** rather than failing. A chain may
-  read through a missing property and only fail when it tries to call one.
-- **`set` on `null` or `undefined` MUST fail** with `-32011`.
-- **`call` on a non-function MUST fail** with `-32010`.
-- **A call awaits its result.** If a method returns a thenable, the Host MUST await it and
-  send the settled value. A chain therefore cannot distinguish a synchronous method from an
-  asynchronous one, and a rejected promise becomes an error Response.
-- **A call's result is unbound.** After a call, `receiver` is `undefined`, so
-  `a.b()()` invokes the returned function with no `this`. This matches JavaScript.
+- **`get` on an empty value yields nothing** rather than failing. A chain may read through
+  a missing member and only fail when it tries to call one.
+- **`set` on an empty value MUST fail** with `-32011`.
+- **`call` on something not callable MUST fail** with `-32010`.
+- **A call resolves its result.** If the invocation produces a deferred result — a promise,
+  a future, a task — the Host MUST wait for it and send the settled value. A chain therefore
+  cannot tell a synchronous operation from an asynchronous one, and a failed one becomes an
+  error Response.
+- **A call's result is unbound.** After a call the receiver is nothing, so a call applied
+  directly to the result of another has no receiver. Languages that require one MUST fail
+  the step rather than invent a binding.
 - **`set` yields nothing.** The Response carries no `result`. A Host MUST NOT send the
   assigned value back: serializing it could mint a handle (Section 10) that the Client never
   receives and so can never release.
@@ -412,11 +452,11 @@ absence.
 | -------- | ------------------- | -------------------------------------------------------- |
 | `-32700` | Parse error         | Reserved; a message that cannot be parsed draws no reply |
 | `-32600` | Invalid request     | Neither or both of `namespace`/`object`; malformed `ops` |
-| `-32601` | Module not found    | `namespace` resolved to `null` or `undefined`            |
+| `-32601` | Module not found    | `namespace` resolved to nothing                          |
 | `-32602` | Invalid handle      | `object`, or an object marker, names no live handle      |
 | `-32603` | Internal error      | The implementation itself failed                         |
 | `-32012` | Version mismatch    | Section 5.2                                              |
-| `-32011` | Cannot set property | `set` against `null` or `undefined`                      |
+| `-32011` | Cannot set property | `set` against an empty value                             |
 | `-32010` | Not a function      | `call` against a non-function                            |
 | `-32000` | Application error   | The target threw or rejected                             |
 
@@ -455,14 +495,17 @@ a Client dropping its proxy is visible to the Host. An entry lives until:
 
 This is the protocol's principal cost, and implementations MUST document it. A Host that
 mints handles automatically will accumulate them for the life of a connection unless the
-Client releases them. Clients SHOULD release explicitly; a `FinalizationRegistry` keyed on
-the handle integer — never on the proxy, which would keep it reachable — is a reasonable
-safety net.
+Client releases them.
+
+Clients SHOULD release explicitly. A Client in a language with finalizers or weak
+references MAY release on collection as a safety net, but whatever it registers MUST hold
+only the handle integer: a finaliser that captures the proxy keeps the proxy reachable, so
+it never runs.
 
 ### 10.3 Use after release
 
 A Request rooted at a released handle, or carrying an object marker naming one, MUST fail
-with `-32602`. A Host MUST NOT silently substitute `undefined`.
+with `-32602`. A Host MUST NOT silently substitute an empty value.
 
 Because identifiers may be reused after release, a Client that releases a handle and then
 uses it races against a later allocation. Clients MUST NOT use a handle after releasing it.
@@ -472,23 +515,33 @@ uses it races against a later allocation. Clients MUST NOT use a handle after re
 ### 11.1 Direction
 
 A function in a Request's `args` or a `set`'s `value` stays in the Client. The Host receives
-a stub; invoking it sends a Callback invocation and yields a promise that settles when the
-Callback result arrives. The function itself never crosses.
+a stub; invoking it sends a Callback invocation and yields a deferred result that settles
+when the Callback result arrives. The function itself never crosses.
 
 A Client SHOULD reuse one identifier for one function, so that passing the same function
 twice does not mint two entries.
 
 ### 11.2 Arity
 
-`args` MUST be truncated to the declared `arity`.
+`arity` is a limit the Client may place on how many arguments it will accept. It is
+optional, and the two cases are distinct:
 
-This is not an optimisation. Callers such as jQuery and cheerio pass extra arguments — event
-objects, DOM elements — that cannot be serialized, and would fail the invocation. Declaring
-`index => …` where the caller passes `(index, element)` is how a Client says it wants only
-the first.
+- **Absent** — no limit. The Host MUST send every argument the call produced.
+- **Present** — the Host MUST truncate `args` to that many before sending, and MUST NOT
+  send more. An `arity` of `0` means the Client wants none.
 
-A consequence: a Client cannot receive an argument it did not declare, and rest parameters
-declare an arity of zero. This is deliberate.
+A Host MUST NOT infer anything else from it. In particular an `arity` lower than the number
+of arguments at hand is not an error, and a Host MUST NOT refuse the call over it.
+
+Two reasons a Client sets one. The first is that its language will not tolerate the extras:
+a callable that accepts a fixed number of arguments raises on a surplus in most statically
+typed languages, and in some dynamic ones. The second is that the extras may not be
+sendable at all — code that takes a callback commonly passes it more than it asked for, an
+index and also the element, a value and also the whole collection, and those additional
+arguments are often precisely the objects that cannot cross a channel.
+
+A Client whose language tolerates surplus arguments, and whose callback can take whatever
+arrives, SHOULD omit `arity` rather than guess a number. See Section 16.3.
 
 ### 11.3 Nesting
 
@@ -509,9 +562,11 @@ routinely finish a later Request first.
 
 ### 12.2 Writes
 
-`set` has no natural caller to await it — in JavaScript `a.b = c` evaluates to `c` and the
-assignment cannot yield a promise — so a Client typically dispatches a write without waiting.
-Combined with 12.1, a read issued after a write can therefore be evaluated **before** it.
+A Client that records chains from ordinary syntax usually has no way to make an assignment
+wait: in most languages an assignment is a statement, or an expression that yields the value
+assigned, and it cannot yield a deferred result for a caller to wait on. Such a Client
+dispatches a write and moves on. Combined with 12.1, a read issued after a write can
+therefore be evaluated **before** it.
 
 A Client that offers read-after-write ordering MUST enforce it, by holding later Requests
 until the writes ahead of them have been answered. This specification does not require that
@@ -542,14 +597,26 @@ object of permitted operations rather than to a general-purpose API.
 
 ### 13.2 Untrusted input
 
-A Host evaluates chains chosen by its peer. Property names are attacker-chosen strings, so
-implementations MUST NOT let a chain reach the prototype chain in a way that allows
-pollution, and SHOULD reject `__proto__`, `constructor` and `prototype` as `get` and `set`
-keys when the peer is not trusted.
+A Host evaluates chains its peer chose. Every key is an attacker-chosen string and every
+argument an attacker-chosen value, and the protocol places no limit on a chain's length,
+its argument count, or how long evaluation may take. A Host exposed to untrusted peers
+SHOULD impose its own limits on all three.
 
-A `call` runs peer-chosen code paths with peer-chosen arguments. There is no depth,
-argument-count or time limit in this protocol; a Host exposed to untrusted peers SHOULD
-impose its own.
+**Which names are dangerous is a property of the host language, not of this protocol.**
+Most languages reach something hazardous through ordinary attribute access — an object's
+type, its defining scope, its module, the objects its type can enumerate — and reaching one
+of them from an exposed object is usually enough to escape whatever the exposure intended.
+The paths differ by language, and a list written here would be wrong somewhere.
+
+An implementation MUST therefore decide for itself which keys a chain may traverse, in the
+terms of its own language and runtime, and MUST document the policy it applies. This
+specification does not define one, and an implementation MUST NOT assume its peer enforces
+anything: a Host is responsible for what a chain can reach on the Host, whatever the Client
+is written in.
+
+Section 13.1 remains the first line of defence. A narrow object exposed by `resolve()`
+bounds what any chain can reach regardless of which keys are permitted, and is easier to
+reason about than a filter over names.
 
 ### 13.3 Disclosure
 
@@ -604,7 +671,8 @@ Both MUST emit `rorpc` on every message and MUST apply Section 5.2 on mismatch.
 | `rorpc` member on every message (§5)    | Implemented.                                           |
 | `__data__` as an object (§6)            | Implemented.                                           |
 | `code` on Host-originated errors (§9.2) | Implemented, and carried onto the reconstructed error. |
-| Prototype-key rejection (§13.2)         | **Not implemented.** `resolve()` is the only boundary. |
+| A way to omit `arity` (§16.3)           | Implemented as `variadic()`, documented in the README. |
+| A documented key policy (§13.2)         | **Not implemented.** `resolve()` is the only boundary. |
 | Everything else                         | Implemented.                                           |
 
 Versions up to **0.4.x** speak an earlier, unversioned format with positional `__data__`
@@ -617,7 +685,71 @@ Requests while a write is in flight.
 
 ---
 
+## 16. Language mapping
+
+The protocol carries only what JSON defines. Everything below is a place where a host
+language's own conventions have to be mapped onto that, and where two implementations will
+disagree unless each says what it chose. An implementation MUST document its answers.
+
+### 16.1 Empty values
+
+RO/RPC distinguishes three states for an optional member: present with a value, present as
+`null`, and absent (§4).
+
+A language with two empty values maps them directly — one to `null`, one to absence. A
+language with one maps that one to `null`, and MUST choose what absence means to it; the
+natural choice is the same empty value, which makes the two indistinguishable locally. That
+is permitted: the distinction matters on the wire, not in every language that speaks it.
+
+A Host MUST NOT reject a Request because an argument arrived as `null` where it expected
+absence, or the reverse. A Client MUST NOT assume a Host preserved the difference.
+
+### 16.2 Members
+
+`get` and `set` name a member of a value (§8.2). What that resolves to is the
+implementation's choice: a field, a property, an attribute, a getter or setter pair, an
+entry in a map, or an index.
+
+Two rules bind that choice. It MUST be consistent — a `set` MUST write what a `get` with
+the same key would read. And a member that exists but cannot be read MUST fail the Request
+rather than report absence, so that a Client can tell "no such member" from "not allowed".
+
+An implementation MAY expose indices as decimal string keys. It MUST say whether it does,
+because a Client cannot discover it.
+
+### 16.3 Callables and arity
+
+A `call` requires the current value to be invocable. What qualifies is the implementation's
+choice: a function, a method reference, a bound delegate, an object with a single abstract
+method, or an object that defines invocation.
+
+`arity` (§11.2) is optional, and a Client decides whether it needs one at all.
+
+A Client in a language that raises on surplus arguments SHOULD send an `arity`, derived
+from the callable's parameter count where the language reports one. A Client in a language
+that ignores surplus arguments MAY omit it and take whatever arrives.
+
+Where a language reports a parameter count, that count may not mean what it appears to. A
+variadic callable commonly reports the number of parameters before the variadic one — zero,
+for one that takes only a variadic — which is a limit the Client almost certainly does not
+want. An implementation that derives `arity` from such a count MUST offer a way to omit it,
+and MUST document how.
+
+### 16.4 Errors
+
+`name` (§6.3) is a string, and carries whatever the originating language calls the error.
+A receiver MUST NOT depend on a particular vocabulary: `name` is for a human reading a log.
+
+A receiver SHOULD reconstruct the error as its own language's error type, and MUST NOT fail
+to deliver an error because `name` matched nothing it knows. `code` is the member to branch
+on (§9.2); it is an integer precisely so that it survives a language boundary unchanged.
+
+---
+
 ## Appendix A: schema
+
+Written as TypeScript declarations, which are used here only as a compact notation for JSON
+shapes. Nothing about the protocol requires TypeScript or JavaScript.
 
 ```typescript
 type Version = `${number}.${number}`;
