@@ -95,6 +95,9 @@ recorded below instead. The version starts to move when this document leaves Dra
 
 ### 2026-09-28
 
+- §8.2 Operations: new OPTIONAL `dir` op, which describes a value instead of operating on
+  it. Added with §8.3, and error code `-32014` for a Host that does not introspect. Old
+  §8.3 renumbered to §8.4.
 - §6.1 Object marker: new OPTIONAL `repr` member, a Host-built string form of the object
   behind a handle. Added with §6.1.1, on why it travels with the handle rather than being
   asked for later.
@@ -463,6 +466,7 @@ two values:
 | `{ "type": "get", "key": k }`             | The receiver becomes the current value; the value becomes its member `k`         |
 | `{ "type": "set", "key": k, "value": v }` | Member `k` of the value is set to `v`; the value and receiver become nothing     |
 | `{ "type": "call", "args": a }`           | The value is invoked with `a` against the receiver; the receiver becomes nothing |
+| `{ "type": "dir" }`                       | The value is described rather than used; see §8.4. OPTIONAL                      |
 
 "Member" means whatever the host language reads for a named access — a field, a property,
 an attribute, an entry of a map, or a getter. An implementation chooses that mapping and
@@ -488,7 +492,52 @@ Notes, all normative:
 An empty `ops` array yields the root itself. Implementations that never send one MAY still
 receive one and MUST handle it.
 
-### 8.3 Ops are not values
+### 8.3 `dir` — introspection
+
+A Host MAY describe a value instead of operating on it. `dir` is **terminal**: what it
+yields is a description, not the value, so no op may follow it. A `dir` that is not last
+MUST fail with `-32600`.
+
+The result is an array, one entry per method the Host is willing to name:
+
+```json
+[
+  { "name": "find", "params": { "arity": { "required": 1, "optional": 1 } } },
+  {
+    "name": "append",
+    "params": {
+      "arity": { "required": 1 },
+      "values": [{ "name": "element", "type": "remote" }]
+    }
+  },
+  { "name": "text" }
+]
+```
+
+| Member          | Type   | Required | Meaning                                            |
+| --------------- | ------ | -------- | -------------------------------------------------- |
+| `name`          | string | yes      | The member a `get` would reach and a `call` invoke |
+| `params`        | object | no       | What is known about the parameters                 |
+| `params.arity`  | object | no       | Counts: `required`, `optional`, `variadic`         |
+| `params.values` | array  | no       | One entry per parameter, in order                  |
+| `values[].name` | string | no       | Parameter name                                     |
+| `values[].type` | string | no       | Parameter type, named by the Host                  |
+
+**Everything but `name` is OPTIONAL, and deliberately so.** Introspection is not equally
+possible in every language. A Host with full reflection can fill all of it; one that builds
+its API dynamically may know only the names; and a language whose functions do not carry
+their parameter list — JavaScript, where the arity counts the parameters before the first
+default and the names are not recoverable without reading the source — can report only
+`required`. A Client MUST treat every absent member as unknown, never as zero or empty.
+
+A Host that does not introspect at all MUST fail with `-32014` rather than answer an empty
+array, which a Client would read as "this value has no methods".
+
+`dir` is a description, not a capability. A Host MUST NOT name a member that its key policy
+(§13.2) would refuse to `get`, or `dir` becomes the way to enumerate exactly what that
+policy hides.
+
+### 8.4 Ops are not values
 
 `ops` is protocol structure, not payload. The `type` and `key` members are plain strings and
 are NOT markers. Only `args` elements and a `set`'s `value` are values in the sense of
@@ -514,6 +563,7 @@ absence.
 | `-32601` | Module not found    | `namespace` resolved to nothing                          |
 | `-32602` | Invalid handle      | `object`, or an object marker, names no live handle      |
 | `-32603` | Internal error      | The implementation itself failed                         |
+| `-32014` | No introspection    | The Host does not answer `dir` for this value (§8.3)     |
 | `-32013` | Key not permitted   | The Host's key policy refused a `get` or `set` (§13.2)   |
 | `-32012` | Version mismatch    | Section 5.2                                              |
 | `-32011` | Cannot set property | `set` against an empty value                             |
