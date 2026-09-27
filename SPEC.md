@@ -184,9 +184,9 @@ are **reserved**: an object carrying both a `__type__` string and a `__data__` o
 marker = { "__type__": string, "__data__": object }
 ```
 
-`__data__` is an object, not a positional array. Members are named, so a marker reads
-without reference to this document, unknown members can be added without renumbering, and
-an optional member is simply absent rather than a `null` holding a place.
+Members are named, so a marker reads without reference to this document, unknown members
+can be added without renumbering, and an optional member is simply absent rather than
+a `null` holding a place.
 
 The dunder names are deliberate. `{ type, data }` is an ordinary shape to find in
 application data; `{ __type__, __data__ }` is not. An application value of the reserved shape
@@ -490,7 +490,8 @@ across connections.
 Handles are **not garbage collected**. A handle is an integer on the wire, and nothing about
 a Client dropping its proxy is visible to the Host. An entry lives until:
 
-- the Client sends a Release naming it (7.5), or
+- the Client sends a Release naming it (7.5),
+- the call it belongs to completes, if it was made for one (10.4), or
 - the connection ends and the Host discards the table.
 
 This is the protocol's principal cost, and implementations MUST document it. A Host that
@@ -510,6 +511,25 @@ with `-32602`. A Host MUST NOT silently substitute an empty value.
 Because identifiers may be reused after release, a Client that releases a handle and then
 uses it races against a later allocation. Clients MUST NOT use a handle after releasing it.
 
+### 10.4 Handles that belong to one call
+
+A handle the Host mints while preparing a Callback invocation (§7.3) belongs to that
+invocation. The Host MUST release it when the matching Callback result arrives, and MUST do
+so after reading that result, so that a handle the Client sent back is still resolvable.
+
+This exists because a callback is the one place a Host mints handles without being asked
+to. Code that takes a callback commonly passes objects to it — an element, a row, a node —
+and a Host with no rule here mints one handle per invocation, for as long as the iteration
+runs. Nothing releases them, because the Client never asked for them and may not know they
+exist.
+
+**A Client MUST NOT use such a handle after its callback has returned.** A Client that needs
+a value beyond the call MUST read it during the call. A Host MUST NOT extend the lifetime to
+accommodate one that does not.
+
+A handle that was already live when the invocation was prepared is not affected: it belongs
+to whatever minted it. Only handles minted for this invocation's arguments are released.
+
 ## 11. Callbacks
 
 ### 11.1 Direction
@@ -520,6 +540,9 @@ when the Callback result arrives. The function itself never crosses.
 
 A Client SHOULD reuse one identifier for one function, so that passing the same function
 twice does not mint two entries.
+
+Arguments that the Host cannot copy become handles, and those handles last only as long as
+the invocation — see §10.4.
 
 ### 11.2 Arity
 
@@ -729,11 +752,14 @@ A Client in a language that raises on surplus arguments SHOULD send an `arity`, 
 from the callable's parameter count where the language reports one. A Client in a language
 that ignores surplus arguments MAY omit it and take whatever arrives.
 
-Where a language reports a parameter count, that count may not mean what it appears to. A
-variadic callable commonly reports the number of parameters before the variadic one — zero,
-for one that takes only a variadic — which is a limit the Client almost certainly does not
-want. An implementation that derives `arity` from such a count MUST offer a way to omit it,
-and MUST document how.
+Where a language reports a parameter count, that count may not mean what it appears to. It
+commonly counts the parameters before the first optional or variadic one — the number the
+callable _requires_, not the number it will accept. Deriving a limit from it caps the call
+at the required count, so an optional parameter can never be supplied and a callable that
+takes only a variadic receives nothing.
+
+An implementation SHOULD NOT derive `arity` from such a count. One that does MUST offer a
+way to omit it, and MUST document how.
 
 ### 16.4 Errors
 
@@ -854,6 +880,6 @@ H→C  {"rorpc":"1.0","id":7,"error":{"__type__":"error","__data__":{"name":"Err
 
 ---
 
-Copyright (c) 2026 [Jakub T. Jankiewicz](https://jakub.jankiewicz.org/)
+Copyright (c) 2026 [Jakub T. Jankiewicz](https://jakub.jankiewicz.org/); source on [GitHub](https://github.com/jcubic/rorpc)
 
 Copyright and related rights waived via [CC0](https://creativecommons.org/publicdomain/zero/1.0/)
