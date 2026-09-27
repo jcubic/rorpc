@@ -475,6 +475,7 @@ absence.
 | `-32601` | Module not found    | `namespace` resolved to nothing                          |
 | `-32602` | Invalid handle      | `object`, or an object marker, names no live handle      |
 | `-32603` | Internal error      | The implementation itself failed                         |
+| `-32013` | Key not permitted   | The Host's key policy refused a `get` or `set` (§13.2)   |
 | `-32012` | Version mismatch    | Section 5.2                                              |
 | `-32011` | Cannot set property | `set` against an empty value                             |
 | `-32010` | Not a function      | `call` against a non-function                            |
@@ -692,6 +693,13 @@ type, its defining scope, its module, the objects its type can enumerate — and
 of them from an exposed object is usually enough to escape whatever the exposure intended.
 The paths differ by language, and a list written here would be wrong somewhere.
 
+A refusal SHOULD be reported with code `-32013` (§9.2), so that a Client can tell a policy
+refusal from a missing member.
+
+Note that refusing writes is not enough. The write that does the damage commonly has an
+innocent key of its own — it is the _reads_ before it that walked somewhere they should not
+have — so a policy that only inspects `set` keys stops nothing.
+
 An implementation MUST therefore decide for itself which keys a chain may traverse, in the
 terms of its own language and runtime, and MUST document the policy it applies. This
 specification does not define one, and an implementation MUST NOT assume its peer enforces
@@ -757,7 +765,7 @@ Both MUST emit `rorpc` on every message and MUST apply Section 5.2 on mismatch.
 | `code` on Host-originated errors (§9.2) | Implemented, and carried onto the reconstructed error.  |
 | Call-scoped handles (§10.4)             | Implemented.                                            |
 | `arity` from a parameter count (§16.3)  | Implemented from the required count, limits documented. |
-| A documented key policy (§13.2)         | **Not implemented.** `resolve()` is the only boundary.  |
+| A documented key policy (§13.2)         | Implemented. `safe_key()` by default, overridable.      |
 | Everything else                         | Implemented.                                            |
 
 Versions up to **0.4.x** speak an earlier, unversioned format with positional `__data__`
