@@ -9,4 +9,4 @@ const spec = await fs.readFile('SPEC.md', 'utf8');
 
 const html = marked.parse(spec);
 
-await fs.writeFile('index.html', template.replace('{{BODY}}', () => html));
+console.log(template.replace('{{BODY}}', () => html));
