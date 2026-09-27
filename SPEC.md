@@ -1,6 +1,6 @@
 # RO/RPC — Remote Object / Remote Procedure Call
 
-**Version 1.0** · Status: Draft · 2026-09-27
+**Version 1.0** · Status: Draft · 2026-09-28
 
 RO/RPC is a stateless, transport-agnostic protocol for using an object that lives somewhere
 else. Where [JSON-RPC](https://www.jsonrpc.org/specification) calls one named method with
@@ -82,6 +82,26 @@ the points where a language's own conventions have to be mapped onto the protoco
 16. [Language mapping](#16-language-mapping)
 17. [Appendix A: schema](#appendix-a-schema)
 18. [Appendix B: an annotated session](#appendix-b-an-annotated-session)
+
+- [Changelog](#changelog)
+
+---
+
+## Changelog
+
+While the status is **Draft** the version stays at `1.0`. A draft is not something an
+implementation can be held to yet, so a change here does not bump the version — it is
+recorded below instead. The version starts to move when this document leaves Draft.
+
+### 2026-09-28
+
+- §6.1 Object marker: new OPTIONAL `repr` member, a Host-built string form of the object
+  behind a handle. Added with §6.1.1, on why it travels with the handle rather than being
+  asked for later.
+
+### 2026-09-27
+
+- First draft.
 
 ---
 
@@ -214,15 +234,34 @@ ordinary JSON object (forward compatibility, Section 5.1).
 
 ```json
 { "__type__": "object", "__data__": { "handle": 1 } }
+{ "__type__": "object", "__data__": { "handle": 2, "repr": "#<jQuery [3]>" } }
 ```
 
-| Member   | Type    | Required | Meaning                                |
-| -------- | ------- | -------- | -------------------------------------- |
-| `handle` | integer | yes      | Entry in the Host's handle table (§10) |
+| Member   | Type    | Required | Meaning                                       |
+| -------- | ------- | -------- | --------------------------------------------- |
+| `handle` | integer | yes      | Entry in the Host's handle table (§10)        |
+| `repr`   | string  | no       | A short string form of the object; see §6.1.1 |
 
 Direction: **both**. From Host to Client it introduces a handle. From Client to Host it
 refers to one already introduced, and the Host MUST substitute the object it names before
 evaluation.
+
+#### 6.1.1 `repr`
+
+A handle stands for an object the Client never receives, so the Client has nothing from
+which to build a readable name for it. `repr` is that name, built by the Host, which does
+hold the object.
+
+- `repr` is **added by the Host when it mints the handle**, and MUST NOT be sent by the
+  Client. A Client referring to a handle sends the integer alone.
+- A Host MAY omit it. A Client that receives no `repr` MUST still work.
+- Its content is unspecified: it is for a person to read — a log line, a REPL, an error
+  message — and a Client MUST NOT parse it or treat it as identity.
+
+It travels with the handle rather than being requested later because a Client typically
+needs it where no round trip is possible. In JavaScript, `String(handle)` runs
+`Symbol.toPrimitive`, which must return a value immediately and cannot await a Response.
+Any language with synchronous string conversion has the same constraint.
 
 ### 6.2 Function marker
 
