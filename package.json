@@ -6,7 +6,7 @@
   "scripts": {},
   "keywords": [],
   "author": "Jakub T. Jankiewicz <jcubic@jcubic.pl> (https://jakub.jankiewicz.org/)",
-  "license": "CC0",
+  "license": "CC0-1.0",
   "type": "module",
   "dependencies": {
     "marked": "^18.0.14",
