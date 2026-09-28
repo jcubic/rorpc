@@ -95,9 +95,13 @@ recorded below instead. The version starts to move when this document leaves Dra
 
 ### 2026-09-28
 
-- §8.2 Operations: new OPTIONAL `dir` op, which describes a value instead of operating on
-  it. Added with §8.3 and §8.3.1 (type names), and error code `-32014` for a Host that does
-  not introspect. Old §8.3 renumbered to §8.4.
+- §6.4 Application-defined types: `object`, `function` and `error` are reserved; every other
+  `__type__` name belongs to the application, which is how a value JSON has no place for —
+  a big integer, a regular expression — crosses a connection.
+- §8.2 Operations: new OPTIONAL `describe` op, which describes a value instead of operating
+  on it. Added with §8.3, which answers `methods` and `properties` (§8.3.1, §8.3.2) named
+  from one type vocabulary (§8.3.3), and error code `-32014` for a Host that does not
+  introspect. Old §8.3 renumbered to §8.4.
 - §6.1 Object marker: new OPTIONAL `repr` member, a Host-built string form of the object
   behind a handle. Added with §6.1.1, on why it travels with the handle rather than being
   asked for later.
@@ -231,7 +235,8 @@ application data; `{ __type__, __data__ }` is not. An application value of the r
 cannot be transmitted; see Section 13.4.
 
 A receiver that encounters a `__type__` it does not recognise MUST treat the object as an
-ordinary JSON object (forward compatibility, Section 5.1).
+ordinary JSON object (forward compatibility, Section 5.1), unless the application has
+defined that name; see Section 6.4.
 
 ### 6.1 Object marker
 
@@ -316,6 +321,33 @@ an absent `stack` as an error.
 Only these four members are defined. **An error's own fields do not travel.** A file error
 arrives without the path it failed on, a validation error without the list of what failed.
 An application that needs more MUST carry it in `message` or distinguish it with `code`.
+
+### 6.4 Application-defined types
+
+`object`, `function` and `error` are **reserved** by this document. Every other `__type__`
+name belongs to the application, and this is the way a value that JSON has no place for
+crosses a connection:
+
+```json
+{ "__type__": "bigint", "__data__": { "value": "9007199254740993" } }
+{ "__type__": "regex", "__data__": { "source": "[a-z]+", "flags": "i" } }
+{ "__type__": "datetime", "__data__": { "iso": "2026-09-28T12:00:00Z" } }
+```
+
+- A marker MUST keep the shape of Section 6: a `__type__` string and a `__data__` object.
+  A name of an application's own buys it nothing else.
+- **Both peers must agree.** Nothing in this document says what `bigint` means, and a peer
+  given a name it has no rule for treats the marker as an ordinary object, per Section 6.
+  That is a silent difference in meaning, not an error: the receiver sees
+  `{ __type__: "bigint", __data__: { value: "..." } }` where the sender meant a number.
+- An implementation SHOULD offer a pair of hooks for this, one on each side of the wire,
+  and MUST apply them to a value nested at any depth — inside an argument, inside a result,
+  inside a Callback's arguments.
+- An implementation MUST NOT let an application redefine a reserved name. A `__type__` of
+  `object` carries a handle and nothing else.
+
+Two peers of the same implementation need only one rule each way. Two peers of different
+implementations need the names written down somewhere this document is not.
 
 ## 7. Messages
 
@@ -466,7 +498,7 @@ two values:
 | `{ "type": "get", "key": k }`             | The receiver becomes the current value; the value becomes its member `k`         |
 | `{ "type": "set", "key": k, "value": v }` | Member `k` of the value is set to `v`; the value and receiver become nothing     |
 | `{ "type": "call", "args": a }`           | The value is invoked with `a` against the receiver; the receiver becomes nothing |
-| `{ "type": "dir" }`                       | The value is described rather than used; see §8.4. OPTIONAL                      |
+| `{ "type": "describe" }`                  | The value is described rather than used; see §8.3. OPTIONAL                      |
 
 "Member" means whatever the host language reads for a named access — a field, a property,
 an attribute, an entry of a map, or a getter. An implementation chooses that mapping and
@@ -492,35 +524,49 @@ Notes, all normative:
 An empty `ops` array yields the root itself. Implementations that never send one MAY still
 receive one and MUST handle it.
 
-### 8.3 `dir` — introspection
+### 8.3 `describe` — introspection
 
-A Host MAY describe a value instead of operating on it. `dir` is **terminal**: what it
-yields is a description, not the value, so no op may follow it. A `dir` that is not last
-MUST fail with `-32600`.
+A Host MAY describe a value instead of operating on it. `describe` is **terminal**: what it
+yields is a description, not the value, so no op may follow it. A `describe` that is not
+last MUST fail with `-32600`.
 
-The result is an array, one entry per method the Host is willing to name:
+The result is an object with two lists — what the value can do, and what it holds:
 
 ```json
-[
-  {
-    "name": "find",
-    "params": {
-      "arity": { "required": 1, "optional": 1 },
-      "values": [{ "name": "selector", "type": "string" }]
+{
+  "methods": [
+    {
+      "name": "find",
+      "params": {
+        "arity": { "required": 1, "optional": 1 },
+        "values": [{ "name": "selector", "type": ["string", "remote"] }]
+      },
+      "result": { "type": ["remote", "null"] }
     },
-    "result": { "type": ["remote", "null"] }
-  },
-  {
-    "name": "append",
-    "params": {
-      "arity": { "required": 1 },
-      "values": [{ "name": "element", "type": "remote" }]
-    },
-    "result": { "type": ["remote"] }
-  },
-  { "name": "text" }
-]
+    { "name": "text" }
+  ],
+  "properties": [
+    { "name": "innerHTML", "readonly": false, "type": ["string"] },
+    { "name": "length", "readonly": true, "type": ["number"] },
+    { "name": "parentNode", "readonly": true }
+  ]
+}
 ```
+
+| Member       | Type  | Required | Meaning                           |
+| ------------ | ----- | -------- | --------------------------------- |
+| `methods`    | array | yes      | Members that are called; §8.3.1   |
+| `properties` | array | yes      | Members that hold a value; §8.3.2 |
+
+Both are REQUIRED and MAY be empty. Two lists rather than one list of tagged entries: every
+entry in a list is the shape of its neighbours, so a Client reads it without first working
+out which kind it has.
+
+A member that is both — a stored value that happens to hold a function — belongs in
+`methods` if the Host means it to be called, and in `properties` if it means it to be read.
+A Host MUST NOT put one name in both lists.
+
+#### 8.3.1 Methods
 
 | Member          | Type   | Required | Meaning                                            |
 | --------------- | ------ | -------- | -------------------------------------------------- |
@@ -529,11 +575,28 @@ The result is an array, one entry per method the Host is willing to name:
 | `params.arity`  | object | no       | Counts: `required`, `optional`, `variadic`         |
 | `params.values` | array  | no       | One entry per parameter, in order                  |
 | `values[].name` | string | no       | Parameter name                                     |
-| `values[].type` | string | no       | Parameter type; §8.3.1                             |
+| `values[].type` | array  | no       | Types the parameter takes; §8.3.3                  |
 | `result`        | object | no       | What a call yields                                 |
-| `result.type`   | array  | yes¹     | The types it may yield; §8.3.1                     |
+| `result.type`   | array  | yes¹     | Types it may yield; §8.3.3                         |
 
 ¹ Required only if `result` is present at all.
+
+#### 8.3.2 Properties
+
+| Member     | Type    | Required | Meaning                                     |
+| ---------- | ------- | -------- | ------------------------------------------- |
+| `name`     | string  | yes      | The member a `get` reads and a `set` writes |
+| `readonly` | boolean | no       | Whether a `set` on it would fail            |
+| `type`     | array   | no       | Types reading it yields; §8.3.3             |
+
+`readonly` describes the member, not the Client's permission. A Host whose key policy
+(§13.2) refuses to write a name MUST leave that name out of `describe` altogether rather
+than report it as readonly, for the reason given at the end of this section.
+
+A Host MUST NOT read a property in order to describe it. Reading may run code — a getter, a
+computed attribute, a lazily loaded field — and describing a value must not have effects. A
+Host that cannot learn the type without reading omits `type`; that is the case for the
+third example above.
 
 **Everything but `name` is OPTIONAL, and deliberately so.** Introspection is not equally
 possible in every language. A Host with full reflection can fill all of it; one that builds
@@ -542,12 +605,12 @@ their parameter list — JavaScript, where the arity counts the parameters befor
 default and the names are not recoverable without reading the source — can report only
 `required`. A Client MUST treat every absent member as unknown, never as zero or empty.
 
-A Host that does not introspect at all MUST fail with `-32014` rather than answer an empty
-array, which a Client would read as "this value has no methods".
+A Host that does not introspect at all MUST fail with `-32014` rather than answer two empty
+lists, which a Client would read as "this value has nothing on it".
 
-#### 8.3.1 Type names
+#### 8.3.3 Type names
 
-`values[].type` and `result.type` name types from one vocabulary:
+`values[].type`, `result.type` and a property's `type` all name types from one vocabulary:
 
 | Name       | Meaning                                         |
 | ---------- | ----------------------------------------------- |
@@ -565,10 +628,10 @@ The first six are the JSON types of §4; `remote` and `function` are what RO/RPC
 them. `void` exists because a method that yields nothing and a method that yields the empty
 value are different facts, and several languages can tell them apart.
 
-**`result.type` is always an array**, even for a single type. A union is the ordinary case —
-`find()` gives a selection or nothing — and one shape means no Client has to first work out
-whether it was handed a name or a list of them. It MUST NOT be empty: a Host that does not
-know omits `result` instead.
+**Every one of them is an array**, even for a single type. A union is the ordinary case —
+`find()` gives a selection or nothing, and takes a string or an element — and one shape
+means no Client has to first work out whether it was handed a name or a list of them. None
+of them MUST be empty: a Host that does not know omits the member instead.
 
 **The vocabulary is open.** A Host whose language has richer types MAY use a name of its own
 — `"DateTime"`, `"Decimal"`, a class name. A Client MUST NOT reject a name it does not
@@ -579,9 +642,9 @@ Nothing here is a guarantee about a value that arrives later. A type name is wha
 believes about its own API, which is a statement about the API and not a promise about the
 next Response. A Client MUST NOT use it to skip checking what it actually received.
 
-`dir` is a description, not a capability. A Host MUST NOT name a member that its key policy
-(§13.2) would refuse to `get`, or `dir` becomes the way to enumerate exactly what that
-policy hides.
+`describe` tells a Client what is there, it does not grant anything. A Host MUST NOT name a
+member that its key policy (§13.2) would refuse to `get`, or `describe` becomes the way to
+enumerate exactly what that policy hides.
 
 ### 8.4 Ops are not values
 
@@ -602,19 +665,19 @@ threw). `code` is what tells them apart, and is the reason it exists.
 `code` SHOULD be present on every error a Host originates. Receivers MUST tolerate its
 absence.
 
-| Code     | Meaning             | Raised when                                              |
-| -------- | ------------------- | -------------------------------------------------------- |
-| `-32700` | Parse error         | Reserved; a message that cannot be parsed draws no reply |
-| `-32600` | Invalid request     | Neither or both of `namespace`/`object`; malformed `ops` |
-| `-32601` | Module not found    | `namespace` resolved to nothing                          |
-| `-32602` | Invalid handle      | `object`, or an object marker, names no live handle      |
-| `-32603` | Internal error      | The implementation itself failed                         |
-| `-32014` | No introspection    | The Host does not answer `dir` for this value (§8.3)     |
-| `-32013` | Key not permitted   | The Host's key policy refused a `get` or `set` (§13.2)   |
-| `-32012` | Version mismatch    | Section 5.2                                              |
-| `-32011` | Cannot set property | `set` against an empty value                             |
-| `-32010` | Not a function      | `call` against a non-function                            |
-| `-32000` | Application error   | The target threw or rejected                             |
+| Code     | Meaning             | Raised when                                               |
+| -------- | ------------------- | --------------------------------------------------------- |
+| `-32700` | Parse error         | Reserved; a message that cannot be parsed draws no reply  |
+| `-32600` | Invalid request     | Neither or both of `namespace`/`object`; malformed `ops`  |
+| `-32601` | Module not found    | `namespace` resolved to nothing                           |
+| `-32602` | Invalid handle      | `object`, or an object marker, names no live handle       |
+| `-32603` | Internal error      | The implementation itself failed                          |
+| `-32014` | No introspection    | The Host does not answer `describe` for this value (§8.3) |
+| `-32013` | Key not permitted   | The Host's key policy refused a `get` or `set` (§13.2)    |
+| `-32012` | Version mismatch    | Section 5.2                                               |
+| `-32011` | Cannot set property | `set` against an empty value                              |
+| `-32010` | Not a function      | `call` against a non-function                             |
+| `-32000` | Application error   | The target threw or rejected                              |
 
 `-32768` to `-32000` are reserved for this specification. Applications MUST NOT use codes in
 that range and MAY use any other integer.
@@ -856,6 +919,10 @@ replace application error messages with a code.
 An application value that is an object with both a `__type__` string and a `__data__` object
 cannot be transmitted: it will be decoded as a marker. Implementations SHOULD document this.
 Values of that shape are rare by construction, which is why those names were chosen.
+
+This is the cost of Section 6.4, and it is worth naming plainly. An application that defines
+its own types gains a way to send what JSON cannot carry, and gives up the ability to send
+that one shape as ordinary data.
 
 ## 14. Differences from JSON-RPC 2.0
 
