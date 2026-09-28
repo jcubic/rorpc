@@ -1,6 +1,6 @@
 # RO/RPC — Remote Object / Remote Procedure Call
 
-**Version 1.0** · Status: Draft · 2026-09-28
+**Version 1.0** · Status: Working Draft · 2026-09-28
 
 RO/RPC is a stateless, transport-agnostic protocol for using an object that lives somewhere
 else. Where [JSON-RPC](https://www.jsonrpc.org/specification) calls one named method with
