@@ -96,8 +96,8 @@ recorded below instead. The version starts to move when this document leaves Dra
 ### 2026-09-28
 
 - §8.2 Operations: new OPTIONAL `dir` op, which describes a value instead of operating on
-  it. Added with §8.3, and error code `-32014` for a Host that does not introspect. Old
-  §8.3 renumbered to §8.4.
+  it. Added with §8.3 and §8.3.1 (type names), and error code `-32014` for a Host that does
+  not introspect. Old §8.3 renumbered to §8.4.
 - §6.1 Object marker: new OPTIONAL `repr` member, a Host-built string form of the object
   behind a handle. Added with §6.1.1, on why it travels with the handle rather than being
   asked for later.
@@ -502,13 +502,21 @@ The result is an array, one entry per method the Host is willing to name:
 
 ```json
 [
-  { "name": "find", "params": { "arity": { "required": 1, "optional": 1 } } },
+  {
+    "name": "find",
+    "params": {
+      "arity": { "required": 1, "optional": 1 },
+      "values": [{ "name": "selector", "type": "string" }]
+    },
+    "result": { "type": ["remote", "null"] }
+  },
   {
     "name": "append",
     "params": {
       "arity": { "required": 1 },
       "values": [{ "name": "element", "type": "remote" }]
-    }
+    },
+    "result": { "type": ["remote"] }
   },
   { "name": "text" }
 ]
@@ -521,7 +529,11 @@ The result is an array, one entry per method the Host is willing to name:
 | `params.arity`  | object | no       | Counts: `required`, `optional`, `variadic`         |
 | `params.values` | array  | no       | One entry per parameter, in order                  |
 | `values[].name` | string | no       | Parameter name                                     |
-| `values[].type` | string | no       | Parameter type, named by the Host                  |
+| `values[].type` | string | no       | Parameter type; §8.3.1                             |
+| `result`        | object | no       | What a call yields                                 |
+| `result.type`   | array  | yes¹     | The types it may yield; §8.3.1                     |
+
+¹ Required only if `result` is present at all.
 
 **Everything but `name` is OPTIONAL, and deliberately so.** Introspection is not equally
 possible in every language. A Host with full reflection can fill all of it; one that builds
@@ -532,6 +544,40 @@ default and the names are not recoverable without reading the source — can rep
 
 A Host that does not introspect at all MUST fail with `-32014` rather than answer an empty
 array, which a Client would read as "this value has no methods".
+
+#### 8.3.1 Type names
+
+`values[].type` and `result.type` name types from one vocabulary:
+
+| Name       | Meaning                                         |
+| ---------- | ----------------------------------------------- |
+| `string`   |                                                 |
+| `number`   |                                                 |
+| `boolean`  |                                                 |
+| `null`     | The empty value                                 |
+| `array`    |                                                 |
+| `object`   | A plain object, sent by value                   |
+| `remote`   | A handle (§6.1) — the object stays on the Host  |
+| `function` | A callback (§6.2)                               |
+| `void`     | Nothing at all, which is not the same as `null` |
+
+The first six are the JSON types of §4; `remote` and `function` are what RO/RPC adds to
+them. `void` exists because a method that yields nothing and a method that yields the empty
+value are different facts, and several languages can tell them apart.
+
+**`result.type` is always an array**, even for a single type. A union is the ordinary case —
+`find()` gives a selection or nothing — and one shape means no Client has to first work out
+whether it was handed a name or a list of them. It MUST NOT be empty: a Host that does not
+know omits `result` instead.
+
+**The vocabulary is open.** A Host whose language has richer types MAY use a name of its own
+— `"DateTime"`, `"Decimal"`, a class name. A Client MUST NOT reject a name it does not
+recognise; it MUST treat it as a type it cannot interpret. A closed vocabulary would make
+every typed Host unusable by every Client that had not been taught its types.
+
+Nothing here is a guarantee about a value that arrives later. A type name is what the Host
+believes about its own API, which is a statement about the API and not a promise about the
+next Response. A Client MUST NOT use it to skip checking what it actually received.
 
 `dir` is a description, not a capability. A Host MUST NOT name a member that its key policy
 (§13.2) would refuse to `get`, or `dir` becomes the way to enumerate exactly what that
